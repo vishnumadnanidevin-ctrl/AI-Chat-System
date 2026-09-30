@@ -1,0 +1,21 @@
+.DS_Store
+node_modules/
+frontend/dist/
+backend/**/bin/
+backend/**/obj/
+.env
+
+# 🔐 API Keys — never commit these
+backend/**/appsettings.json
+backend/**/appsettings.*.json
+!backend/**/appsettings.example.json
+
+# Secrets
+*.user
+secrets.json
+
+# IDE files
+.vs/
+*.suo
+*.user
+.idea/
