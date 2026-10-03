@@ -40,6 +40,7 @@ export default function ProviderConfigModal({
       case 'Groq': return 'https://console.groq.com/keys';
       case 'Mistral': return 'https://console.mistral.ai/api-keys';
       case 'OpenRouter': return 'https://openrouter.ai/keys';
+      case 'Nvidia': return 'https://build.nvidia.com';
       case 'Ollama': return 'https://ollama.com/download';
       default: return null;
     }

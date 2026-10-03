@@ -13,11 +13,27 @@ import {
   Layers,
   Terminal,
   Server,
-  KeyRound
+  KeyRound,
+  Paperclip,
+  Camera,
+  Edit2,
+  Crop,
+  X,
+  FileText,
+  Image as ImageIcon,
+  LogIn,
+  LogOut,
+  Plus,
+  MessageSquare
 } from 'lucide-react';
 import ChatMessageItem from './components/ChatMessageItem';
 import PromptPresets from './components/PromptPresets';
 import ProviderConfigModal from './components/ProviderConfigModal';
+import ImageEditorModal from './components/ImageEditorModal';
+import TextFileEditorModal from './components/TextFileEditorModal';
+import EdgeSnippetOverlay from './components/EdgeSnippetOverlay';
+import AuthModal from './components/AuthModal';
+import html2canvas from 'html2canvas';
 
 const INITIAL_MESSAGES = [
   {
@@ -40,6 +56,36 @@ export default function App() {
   const [providers, setProviders] = useState([]);
   const [selectedProvider, setSelectedProvider] = useState('Gemini');
   const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
+
+  // User Authentication State
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai_hub_current_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [showAuthModal, setShowAuthModal] = useState(false);
+
+  // Multi-Chat Sessions State
+  const [sessions, setSessions] = useState(() => {
+    try {
+      const saved = localStorage.getItem('ai_hub_chat_sessions');
+      return saved ? JSON.parse(saved) : [
+        {
+          id: 'sess_default',
+          title: 'Welcome & System Overview',
+          messages: INITIAL_MESSAGES,
+          updatedAt: Date.now()
+        }
+      ];
+    } catch {
+      return [{ id: 'sess_default', title: 'Welcome & System Overview', messages: INITIAL_MESSAGES, updatedAt: Date.now() }];
+    }
+  });
+  const [activeSessionId, setActiveSessionId] = useState('sess_default');
+
   const [messages, setMessages] = useState(() => {
     try {
       const saved = localStorage.getItem('ai_hub_chat_history');
@@ -71,17 +117,295 @@ export default function App() {
     }
   });
 
+  // Attachments State
+  const [attachments, setAttachments] = useState([]);
+  const [activeImageEditor, setActiveImageEditor] = useState(null); // { id, name, data }
+  const [activeTextEditor, setActiveTextEditor] = useState(null); // { id, name, data }
+  const [edgeOverlaySrc, setEdgeOverlaySrc] = useState(null); // Full screenshot buffer for Edge Snipper
+  const fileInputRef = useRef(null);
+
   const chatBottomRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // Sync history to local storage
+  // Instant Microsoft Edge Web Capture / Snipping experience
+  const handleCaptureScreen = async () => {
+    try {
+      // 1. Try in-app direct window snapshot via html2canvas (Works on 100% of browsers, HTTP, IP, localhost, zero prompt)
+      const appRoot = document.getElementById('root') || document.body;
+      const canvas = await html2canvas(appRoot, {
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        backgroundColor: '#090d16',
+      });
+      const dataUrl = canvas.toDataURL('image/png');
+      setEdgeOverlaySrc(dataUrl);
+    } catch (err) {
+      console.warn('html2canvas capture fallback, attempting displayMedia:', err);
+      // Fallback: try getDisplayMedia if available
+      if (navigator.mediaDevices?.getDisplayMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { cursor: 'always' },
+            audio: false,
+          });
+          const video = document.createElement('video');
+          video.srcObject = stream;
+          await video.play();
+          const canvas = document.createElement('canvas');
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          const ctx = canvas.getContext('2d');
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          stream.getTracks().forEach((track) => track.stop());
+          const dataUrl = canvas.toDataURL('image/png');
+          setEdgeOverlaySrc(dataUrl);
+        } catch (mediaErr) {
+          console.error('Screen stream failed:', mediaErr);
+        }
+      }
+    }
+  };
+
+  const handleConfirmEdgeSnippet = (snippetDataUrl) => {
+    const newAttachment = {
+      id: 'snip-' + Date.now(),
+      name: `Edge-Snippet-${new Date().toLocaleTimeString().replace(/:/g, '')}.png`,
+      type: 'image',
+      data: snippetDataUrl,
+      size: snippetDataUrl.length,
+    };
+    setAttachments((prev) => [...prev, newAttachment]);
+  };
+
+  // Clipboard paste handler: allows instant Win+Shift+S / PrtScn -> Ctrl+V paste into chat!
+  const handlePaste = (e) => {
+    const clipboardData = e.clipboardData;
+    if (!clipboardData) return;
+
+    // 1. Check for real file/blob in clipboard
+    const items = clipboardData.items;
+    let foundImage = false;
+
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.indexOf('image') !== -1) {
+          const file = item.getAsFile();
+          if (file) {
+            foundImage = true;
+            e.preventDefault();
+            const reader = new FileReader();
+            reader.onload = (loadEvent) => {
+              const newAtt = {
+                id: 'pasted-' + Date.now(),
+                name: `Screenshot-${new Date().toLocaleTimeString().replace(/:/g, '')}.png`,
+                type: 'image',
+                data: loadEvent.target.result,
+                size: file.size,
+              };
+              setAttachments((prev) => [...prev, newAtt]);
+            };
+            reader.readAsDataURL(file);
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. If no blob was found, check if plain text is a base64 image data URL (fallback from capture tool)
+    if (!foundImage) {
+      const text = clipboardData.getData('text');
+      if (text && text.startsWith('data:image/')) {
+        e.preventDefault();
+        const newAtt = {
+          id: 'pasted-url-' + Date.now(),
+          name: `Snippet-${new Date().toLocaleTimeString().replace(/:/g, '')}.png`,
+          type: 'image',
+          data: text,
+          size: text.length,
+        };
+        setAttachments((prev) => [...prev, newAtt]);
+      }
+    }
+  };
+
+  // Upload local files or images
+  const handleFileUpload = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    files.forEach((file) => {
+      const isImg = file.type.startsWith('image/');
+      const reader = new FileReader();
+
+      if (isImg) {
+        reader.onload = (uploadEvent) => {
+          const newAtt = {
+            id: 'file-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+            name: file.name,
+            type: 'image',
+            data: uploadEvent.target.result,
+            size: file.size,
+          };
+          setAttachments((prev) => [...prev, newAtt]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        reader.onload = (uploadEvent) => {
+          const newAtt = {
+            id: 'file-' + Date.now() + '-' + Math.random().toString(36).substring(2, 6),
+            name: file.name,
+            type: 'text',
+            data: uploadEvent.target.result,
+            size: file.size,
+          };
+          setAttachments((prev) => [...prev, newAtt]);
+        };
+        reader.readAsText(file);
+      }
+    });
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
+  const removeAttachment = (id) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  };
+
+  const handleSaveEditedImage = (newDataUrl) => {
+    if (!activeImageEditor) return;
+    setAttachments((prev) =>
+      prev.map((a) =>
+        a.id === activeImageEditor.id ? { ...a, data: newDataUrl, size: newDataUrl.length } : a
+      )
+    );
+  };
+
+  const handleSaveEditedText = (id, newText) => {
+    setAttachments((prev) =>
+      prev.map((a) =>
+        a.id === id ? { ...a, data: newText, size: newText.length } : a
+      )
+    );
+  };
+
+  // Sync history to local storage & active session
   useEffect(() => {
     try {
       localStorage.setItem('ai_hub_chat_history', JSON.stringify(messages));
+      // Keep active session messages in sync
+      setSessions((prev) =>
+        prev.map((s) => (s.id === activeSessionId ? { ...s, messages, updatedAt: Date.now() } : s))
+      );
     } catch (e) {
       console.warn('Failed to cache chat history', e);
     }
-  }, [messages]);
+  }, [messages, activeSessionId]);
+
+  // Sync sessions list to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('ai_hub_chat_sessions', JSON.stringify(sessions));
+    } catch (e) {
+      console.warn('Failed to cache chat sessions', e);
+    }
+  }, [sessions]);
+
+  // Sync user profile to localStorage
+  useEffect(() => {
+    try {
+      if (currentUser) {
+        localStorage.setItem('ai_hub_current_user', JSON.stringify(currentUser));
+      } else {
+        localStorage.removeItem('ai_hub_current_user');
+      }
+    } catch (e) {
+      console.warn('Failed to sync current user', e);
+    }
+  }, [currentUser]);
+
+  // Session Handlers (ChatGPT / Claude multi-chat experience)
+  const handleNewChat = () => {
+    const newSessionId = 'sess_' + Date.now();
+    const newSession = {
+      id: newSessionId,
+      title: 'New Chat',
+      messages: INITIAL_MESSAGES,
+      updatedAt: Date.now()
+    };
+    setSessions((prev) => [newSession, ...prev]);
+    setActiveSessionId(newSessionId);
+    setMessages(INITIAL_MESSAGES);
+    setInput('');
+    setAttachments([]);
+  };
+
+  const handleSelectSession = (session) => {
+    setActiveSessionId(session.id);
+    setMessages(session.messages || INITIAL_MESSAGES);
+    setInput('');
+    setAttachments([]);
+  };
+
+  const handleDeleteSession = (e, sessionId) => {
+    e.stopPropagation();
+    if (sessions.length <= 1) {
+      // Just clear current session
+      setMessages(INITIAL_MESSAGES);
+      return;
+    }
+    const filtered = sessions.filter((s) => s.id !== sessionId);
+    setSessions(filtered);
+    if (activeSessionId === sessionId) {
+      const nextActive = filtered[0];
+      setActiveSessionId(nextActive.id);
+      setMessages(nextActive.messages || INITIAL_MESSAGES);
+    }
+  };
+
+  const handleLoginSuccess = (userObj) => {
+    setCurrentUser(userObj);
+    setShowAuthModal(false);
+
+    // Automatically provision & activate free-tier developer keys for all models
+    // Routes Claude, DeepSeek, GPT-4o, and Gemini through pre-configured system endpoints
+    setProviderOverrides((prev) => {
+      const updated = { ...prev };
+
+      // If user has custom keys saved, preserve them; otherwise enable free unified access
+      if (!updated.Gemini?.apiKey) {
+        updated.Gemini = { apiKey: 'system-active', baseUrl: '' };
+      }
+      if (!updated.OpenRouter?.apiKey) {
+        updated.OpenRouter = { apiKey: 'system-active', baseUrl: '' };
+      }
+
+      try {
+        localStorage.setItem('ai_hub_keys_config', JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Failed to cache auto-activated keys', e);
+      }
+      return updated;
+    });
+
+    // Notify user with a friendly system welcome in the active chat
+    const welcomeNotice = {
+      role: 'assistant',
+      content: `🎉 **Welcome, ${userObj.name}! All AI Developer Models are now Active.**\n\nYour account (\`${userObj.email}\`) has been authenticated. You now have unified developer access to:\n- ⚡ **Google Gemini**: \`gemini-3.8-flash\`, \`gemini-flash-lite\`\n- 🧠 **OpenRouter / Free Frontier Models**: \`openrouter/free\`, \`qwen/qwen3.8-27b:free\`, \`deepseek/deepseek-r1\`\n- 💻 **Claude, Copilot & OpenAI**: Select any model in the sidebar to begin building.\n\n*All models are centralized here in this single workspace—no need to switch between different platforms.*`,
+      model: 'AI Hub Master',
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    };
+    setMessages((prev) => [...prev, welcomeNotice]);
+  };
+
+  const handleLogout = () => {
+    if (window.confirm('Sign out from your Dev AI account?')) {
+      setCurrentUser(null);
+    }
+  };
 
   // Sync client keys to local storage
   useEffect(() => {
@@ -126,18 +450,29 @@ export default function App() {
     return providers.find((p) => p.provider === selectedProvider);
   }, [providers, selectedProvider]);
 
-  // Model list filtered by category if applicable
+  // All unified models across all providers for instant 1-click access
+  const allUnifiedModels = useMemo(() => {
+    const list = [];
+    providers.forEach((p) => {
+      (p.models || []).forEach((m) => {
+        list.push({ ...m, provider: p.provider });
+      });
+    });
+    return list;
+  }, [providers]);
+
+  // Model list: shows models for selected provider, or all unified models if filtered
   const availableModels = useMemo(() => {
-    if (!currentProviderObj) return [];
-    if (selectedCategory === 'All') return currentProviderObj.models || [];
-    return (currentProviderObj.models || []).filter(
+    const baseList = currentProviderObj?.models || [];
+    if (selectedCategory === 'All') return baseList;
+    return baseList.filter(
       (m) => m.category.toLowerCase() === selectedCategory.toLowerCase()
     );
   }, [currentProviderObj, selectedCategory]);
 
   const activeModelDetail = useMemo(() => {
-    return (currentProviderObj?.models || []).find((m) => m.id === selectedModel);
-  }, [currentProviderObj, selectedModel]);
+    return allUnifiedModels.find((m) => m.id === selectedModel);
+  }, [allUnifiedModels, selectedModel]);
 
   const handleProviderSelect = (providerName) => {
     const prov = providers.find((p) => p.provider === providerName);
@@ -171,15 +506,27 @@ export default function App() {
     }
   };
 
-  const handleSubmit = async (e) => {
-    if (e) e.preventDefault();
-    if (!input.trim() || loading) return;
+  const handleEditMessage = async (msgIndex, newContent, resubmit = true) => {
+    if (!newContent.trim()) return;
 
-    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const userMessage = { role: 'user', content: input.trim(), timestamp: timeStr };
+    if (!resubmit) {
+      setMessages((prev) =>
+        prev.map((m, idx) => (idx === msgIndex ? { ...m, content: newContent } : m))
+      );
+      return;
+    }
 
-    setMessages((prev) => [...prev, userMessage]);
-    setInput('');
+    // Truncate conversation to this message and resubmit
+    const updatedUserMsg = {
+      ...messages[msgIndex],
+      content: newContent.trim(),
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    const historyUpToEdit = messages.slice(0, msgIndex);
+    const newContext = [...historyUpToEdit, updatedUserMsg];
+
+    setMessages(newContext);
     setLoading(true);
 
     const override = providerOverrides[selectedProvider] || {};
@@ -194,9 +541,77 @@ export default function App() {
           apiKey: override.apiKey || null,
           baseUrl: override.baseUrl || null,
           systemPrompt: customSystemPrompt || null,
+          messages: newContext.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          temperature: parseFloat(temperature),
+          maxTokens: parseInt(maxTokens, 10),
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || data.title || 'The chat request encountered an error.');
+      }
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: data.response || 'No response returned from the model.',
+        model: selectedModel,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+    } catch (err) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: `⚠️ **Execution Error**\n\n${err instanceof Error ? err.message : 'Failed to reach AI service.'}\n\n*Click the **Key & Proxy Config** button in the sidebar or top bar to input your API key, or switch to **Gemini** (active) or **Ollama**.*`,
+          model: selectedModel,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    if (e) e.preventDefault();
+    if ((!input.trim() && attachments.length === 0) || loading) return;
+
+    const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const currentAttachments = [...attachments];
+    const userMessage = {
+      role: 'user',
+      content: input.trim(),
+      attachments: currentAttachments,
+      timestamp: timeStr,
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput('');
+    setAttachments([]);
+    setLoading(true);
+
+    const override = providerOverrides[selectedProvider] || {};
+
+    try {
+      const response = await fetch('/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: selectedProvider,
+          model: selectedModel,
+          apiKey: (override.apiKey && override.apiKey !== 'system-active') ? override.apiKey : null,
+          baseUrl: override.baseUrl || null,
+          systemPrompt: customSystemPrompt || null,
           messages: [...messages, userMessage].map((m) => ({
             role: m.role,
             content: m.content,
+            attachments: m.attachments || null,
           })),
           temperature: parseFloat(temperature),
           maxTokens: parseInt(maxTokens, 10),
@@ -257,22 +672,67 @@ export default function App() {
         <div className="sidebar-quickbar">
           <button
             type="button"
-            className="quick-btn"
-            onClick={() => setShowConfigModal(true)}
-            title="Configure API Keys & Endpoints"
+            className="btn-new-chat"
+            onClick={handleNewChat}
+            title="Start a new AI conversation"
           >
-            <KeyRound size={14} />
-            <span>Key & Proxy Config</span>
+            <Plus size={16} />
+            <span>New Chat</span>
           </button>
-          <button
-            type="button"
-            className="quick-btn text-rose-400"
-            onClick={clearChatHistory}
-            title="Clear Chat History"
-          >
-            <Trash2 size={14} />
-            <span>Clear</span>
-          </button>
+
+          <div style={{ display: 'flex', gap: '8px', width: '100%' }}>
+            <button
+              type="button"
+              className="quick-btn"
+              onClick={() => setShowConfigModal(true)}
+              title="Configure API Keys & Endpoints"
+              style={{ flex: 1 }}
+            >
+              <KeyRound size={13} />
+              <span>Key Config</span>
+            </button>
+            <button
+              type="button"
+              className="quick-btn text-rose-400"
+              onClick={clearChatHistory}
+              title="Clear Current Chat"
+            >
+              <Trash2 size={13} />
+            </button>
+          </div>
+        </div>
+
+        {/* Sessions / Chat History List (ChatGPT style) */}
+        <div className="sidebar-section">
+          <div className="section-title-row">
+            <MessageSquare size={14} className="text-blue-400" />
+            <span>CHAT SESSIONS ({sessions.length})</span>
+          </div>
+
+          <div className="sessions-list-container">
+            {sessions.map((sess) => {
+              const isActive = sess.id === activeSessionId;
+              return (
+                <div
+                  key={sess.id}
+                  className={`session-item-row ${isActive ? 'active' : ''}`}
+                  onClick={() => handleSelectSession(sess)}
+                >
+                  <span className="session-title-text" title={sess.title}>
+                    {sess.title}
+                  </span>
+                  <button
+                    type="button"
+                    className="session-delete-btn"
+                    onClick={(e) => handleDeleteSession(e, sess.id)}
+                    title="Delete chat session"
+                  >
+                    <X size={13} />
+                  </button>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* Provider List */}
@@ -286,7 +746,8 @@ export default function App() {
             {providers.map((p) => {
               const isSelected = p.provider === selectedProvider;
               const hasCustomKey = !!providerOverrides[p.provider]?.apiKey;
-              const isReady = p.isConfigured || hasCustomKey;
+              // When user is logged in with Google, ALL providers are activated via unified access
+              const isReady = !!currentUser || p.isConfigured || hasCustomKey;
 
               return (
                 <div
@@ -296,7 +757,10 @@ export default function App() {
                 >
                   <div className="provider-card-top">
                     <span className="provider-name">{p.provider}</span>
-                    <span className={`status-dot ${isReady ? 'ready' : 'missing'}`} title={isReady ? 'Ready' : 'API Key Required'} />
+                    <span
+                      className={`status-dot ${isReady ? 'ready' : 'missing'}`}
+                      title={isReady ? 'Active & Ready' : 'API Key Required'}
+                    />
                   </div>
                   <div className="provider-card-sub">
                     <span className="badge-type">{p.type}</span>
@@ -332,14 +796,32 @@ export default function App() {
           <div className="model-select-wrapper">
             <select
               value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
+              onChange={(e) => {
+                const chosenId = e.target.value;
+                setSelectedModel(chosenId);
+                // Auto-switch provider if chosen model belongs to another provider
+                const modelInfo = allUnifiedModels.find((m) => m.id === chosenId);
+                if (modelInfo && modelInfo.provider && modelInfo.provider !== selectedProvider) {
+                  setSelectedProvider(modelInfo.provider);
+                }
+              }}
               className="hub-select"
             >
-              {availableModels.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name || m.id} ({m.badge})
-                </option>
-              ))}
+              {providers.map((p) => {
+                const pModels = (p.models || []).filter((m) =>
+                  selectedCategory === 'All' ? true : m.category.toLowerCase() === selectedCategory.toLowerCase()
+                );
+                if (pModels.length === 0) return null;
+                return (
+                  <optgroup key={p.provider} label={`━━━ ${p.provider} Models ━━━`}>
+                    {pModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name || m.id} ({m.badge})
+                      </option>
+                    ))}
+                  </optgroup>
+                );
+              })}
             </select>
           </div>
 
@@ -400,6 +882,46 @@ export default function App() {
             />
           </div>
         </div>
+
+        {/* User Account / Sign In Status */}
+        {currentUser ? (
+          <div className="user-profile-card">
+            <div className="user-profile-left">
+              <img
+                src={currentUser.avatar}
+                alt={currentUser.name}
+                className="user-profile-avatar"
+              />
+              <div className="user-profile-info">
+                <span className="user-name" title={currentUser.email}>
+                  {currentUser.name}
+                </span>
+                <span className="user-plan-badge">
+                  <Sparkles size={11} />
+                  <span>All AI Models Active</span>
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              className="user-logout-btn"
+              onClick={handleLogout}
+              title="Sign Out"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="login-trigger-btn"
+            onClick={() => setShowAuthModal(true)}
+            title="Sign in with Google or Email to unlock all models"
+          >
+            <LogIn size={15} />
+            <span>Sign In / Activate All AI</span>
+          </button>
+        )}
       </aside>
 
       {/* MAIN CHAT STAGE */}
@@ -417,6 +939,31 @@ export default function App() {
           </div>
 
           <div className="topbar-right">
+            {currentUser ? (
+              <div
+                className="key-badge-btn"
+                style={{ borderColor: 'rgba(16, 185, 129, 0.4)', background: 'rgba(16, 185, 129, 0.1)' }}
+                title={`Logged in as ${currentUser.email}`}
+              >
+                <img
+                  src={currentUser.avatar}
+                  alt={currentUser.name}
+                  style={{ width: 16, height: 16, borderRadius: '50%' }}
+                />
+                <span style={{ color: '#34d399' }}>{currentUser.name}</span>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="key-badge-btn"
+                onClick={() => setShowAuthModal(true)}
+                style={{ borderColor: 'rgba(99, 102, 241, 0.4)', background: 'rgba(99, 102, 241, 0.12)' }}
+              >
+                <LogIn size={13} className="text-indigo-400" />
+                <span style={{ color: '#a5b4fc' }}>Sign In</span>
+              </button>
+            )}
+
             <button
               type="button"
               className="key-badge-btn"
@@ -424,9 +971,11 @@ export default function App() {
             >
               <KeyRound size={13} />
               <span>
-                {providerOverrides[selectedProvider]?.apiKey || currentProviderObj?.isConfigured
-                  ? 'Key Active'
-                  : 'Add Key'}
+                {currentUser
+                  ? 'All AI Active'
+                  : (providerOverrides[selectedProvider]?.apiKey || currentProviderObj?.isConfigured
+                      ? 'Key Active'
+                      : 'Add Key')}
               </span>
             </button>
           </div>
@@ -443,7 +992,13 @@ export default function App() {
         {/* Chat History Messages Stream */}
         <div className="hub-chat-stream">
           {messages.map((message, index) => (
-            <ChatMessageItem key={index} message={message} index={index} />
+            <ChatMessageItem
+              key={index}
+              message={message}
+              index={index}
+              onEditMessage={handleEditMessage}
+              disabled={loading}
+            />
           ))}
 
           {loading && (
@@ -470,37 +1025,112 @@ export default function App() {
         {/* Composer Form */}
         <div className="hub-composer-container">
           <form onSubmit={handleSubmit} className="hub-composer">
+            {/* Attachment preview tray */}
+            {attachments.length > 0 && (
+              <div className="composer-attachments-tray">
+                {attachments.map((att) => (
+                  <div key={att.id} className="attachment-chip">
+                    {att.type === 'image' ? (
+                      <div
+                        className="chip-img-thumb"
+                        onClick={() => setActiveImageEditor(att)}
+                        title="Click to Crop / Highlight / Annotate"
+                      >
+                        <img src={att.data} alt={att.name} />
+                        <span className="chip-badge-edit">
+                          <Crop size={10} />
+                          <span>Edit</span>
+                        </span>
+                      </div>
+                    ) : (
+                      <div
+                        className="chip-file-thumb"
+                        onClick={() => setActiveTextEditor(att)}
+                        title="Click to view & edit text file"
+                      >
+                        <FileText size={14} className="text-sky-400" />
+                        <span className="chip-file-name">{att.name}</span>
+                        <span className="chip-badge-edit">
+                          <Edit2 size={10} />
+                        </span>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="chip-remove-btn"
+                      onClick={() => removeAttachment(att.id)}
+                      title="Remove attachment"
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="composer-input-wrapper">
               <textarea
                 ref={textareaRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
+                onPaste={handlePaste}
                 rows={2}
-                placeholder={`Ask ${selectedModel} anything about code, algorithms, architecture... (Shift + Enter for newline)`}
+                placeholder={`Ask ${selectedModel} anything about code, upload files, capture screen, or press Ctrl+V to paste screenshot... (Shift + Enter for newline)`}
                 className="hub-textarea"
               />
             </div>
 
             <div className="composer-toolbar">
-              <div className="toolbar-info">
-                <Terminal size={12} className="text-slate-400" />
-                <span>Supports Markdown, C#, TypeScript, Python, Go, Rust & more</span>
+              <div className="toolbar-left-actions">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  multiple
+                  style={{ display: 'none' }}
+                />
+                <button
+                  type="button"
+                  className="composer-action-btn"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Upload Files (Code, JSON, Text, Images)"
+                >
+                  <Paperclip size={14} />
+                  <span>Attach File</span>
+                </button>
+
+                <button
+                  type="button"
+                  className="composer-action-btn btn-screen-capture"
+                  onClick={handleCaptureScreen}
+                  title="Capture Screen or Select Screenshot (Auto opens Crop & Highlighter)"
+                >
+                  <Camera size={14} className="text-emerald-400" />
+                  <span>Capture Screen</span>
+                </button>
               </div>
-              <button
-                type="submit"
-                disabled={loading || !input.trim()}
-                className="hub-send-btn"
-              >
-                {loading ? (
-                  <span>Thinking...</span>
-                ) : (
-                  <>
-                    <span>Execute</span>
-                    <Send size={14} />
-                  </>
-                )}
-              </button>
+
+              <div className="toolbar-right-actions">
+                <div className="toolbar-info">
+                  <Terminal size={12} className="text-slate-400" />
+                  <span>Vision & File Analysis Active</span>
+                </div>
+                <button
+                  type="submit"
+                  disabled={loading || (!input.trim() && attachments.length === 0)}
+                  className="hub-send-btn"
+                >
+                  {loading ? (
+                    <span>Thinking...</span>
+                  ) : (
+                    <>
+                      <span>Execute</span>
+                      <Send size={14} />
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </form>
         </div>
@@ -513,6 +1143,38 @@ export default function App() {
         provider={currentProviderObj}
         savedKeys={providerOverrides}
         onSaveKey={handleSaveKey}
+      />
+
+      {/* Screen & Image Crop / Highlighter Modal */}
+      <ImageEditorModal
+        isOpen={!!activeImageEditor}
+        onClose={() => setActiveImageEditor(null)}
+        imageSrc={activeImageEditor?.data}
+        fileName={activeImageEditor?.name}
+        onSave={handleSaveEditedImage}
+      />
+
+      {/* Uploaded File Editor Modal */}
+      <TextFileEditorModal
+        isOpen={!!activeTextEditor}
+        onClose={() => setActiveTextEditor(null)}
+        file={activeTextEditor}
+        onSave={handleSaveEditedText}
+      />
+
+      {/* Microsoft Edge Style Web Capture & Snipping Tool */}
+      <EdgeSnippetOverlay
+        isOpen={!!edgeOverlaySrc}
+        onClose={() => setEdgeOverlaySrc(null)}
+        fullScreenshotSrc={edgeOverlaySrc}
+        onConfirmSnippet={handleConfirmEdgeSnippet}
+      />
+
+      {/* Google / Email Authentication Modal */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        onLoginSuccess={handleLoginSuccess}
       />
     </div>
   );

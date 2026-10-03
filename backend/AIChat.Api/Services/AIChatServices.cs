@@ -40,7 +40,40 @@ public class OpenAICompatibleChatService : IChatService
         }
         foreach (var m in request.Messages)
         {
-            messagesPayload.Add(new { role = m.Role, content = m.Content });
+            if (m.Attachments != null && m.Attachments.Count > 0)
+            {
+                var contentParts = new List<object>();
+                if (!string.IsNullOrWhiteSpace(m.Content))
+                {
+                    contentParts.Add(new { type = "text", text = m.Content });
+                }
+
+                foreach (var att in m.Attachments)
+                {
+                    if (att.Type == "image" || att.Data.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
+                    {
+                        contentParts.Add(new
+                        {
+                            type = "image_url",
+                            image_url = new { url = att.Data }
+                        });
+                    }
+                    else
+                    {
+                        contentParts.Add(new
+                        {
+                            type = "text",
+                            text = $"\n--- File Attachment: {att.Name} ---\n{att.Data}\n--- End File ---"
+                        });
+                    }
+                }
+
+                messagesPayload.Add(new { role = m.Role, content = contentParts });
+            }
+            else
+            {
+                messagesPayload.Add(new { role = m.Role, content = m.Content });
+            }
         }
 
         var payload = new
@@ -59,6 +92,12 @@ public class OpenAICompatibleChatService : IChatService
         if (!string.IsNullOrWhiteSpace(_provider.ApiKey))
         {
             httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _provider.ApiKey);
+        }
+
+        if (endpoint.Contains("openrouter.ai", StringComparison.OrdinalIgnoreCase))
+        {
+            httpRequest.Headers.TryAddWithoutValidation("HTTP-Referer", "http://localhost:5173");
+            httpRequest.Headers.TryAddWithoutValidation("X-Title", "AI Code Assistant");
         }
 
         try
@@ -196,10 +235,59 @@ public class GeminiChatService : IChatService
     {
         var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{modelId}:generateContent?key={apiKey}";
 
-        var contents = request.Messages.Select(m => new
+        var contents = request.Messages.Select(m =>
         {
-            role = m.Role == "assistant" ? "model" : "user",
-            parts = new[] { new { text = m.Content } }
+            var partsList = new List<object>();
+            if (!string.IsNullOrWhiteSpace(m.Content))
+            {
+                partsList.Add(new { text = m.Content });
+            }
+
+            if (m.Attachments != null)
+            {
+                foreach (var att in m.Attachments)
+                {
+                    if (att.Type == "image" || att.Data.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var commaIdx = att.Data.IndexOf(',');
+                        var base64Part = commaIdx >= 0 ? att.Data.Substring(commaIdx + 1) : att.Data;
+                        var mime = "image/png";
+                        if (att.Data.StartsWith("data:") && commaIdx > 5)
+                        {
+                            var header = att.Data.Substring(5, commaIdx - 5);
+                            var semi = header.IndexOf(';');
+                            if (semi > 0) mime = header.Substring(0, semi);
+                        }
+
+                        partsList.Add(new
+                        {
+                            inline_data = new
+                            {
+                                mime_type = mime,
+                                data = base64Part
+                            }
+                        });
+                    }
+                    else
+                    {
+                        partsList.Add(new
+                        {
+                            text = $"\n--- File Attachment: {att.Name} ---\n{att.Data}\n--- End File ---"
+                        });
+                    }
+                }
+            }
+
+            if (partsList.Count == 0)
+            {
+                partsList.Add(new { text = " " });
+            }
+
+            return new
+            {
+                role = m.Role == "assistant" ? "model" : "user",
+                parts = partsList
+            };
         }).ToList();
 
         var payload = new Dictionary<string, object>

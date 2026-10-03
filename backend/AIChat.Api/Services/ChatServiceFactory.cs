@@ -15,6 +15,12 @@ public class ChatServiceFactory
         _providerSettings = providerSettings;
     }
 
+    public ProviderConfig? GetProviderConfig(string providerName)
+    {
+        var providers = _providerSettings.CurrentValue.Providers;
+        return providers.ContainsKey(providerName) ? providers[providerName] : null;
+    }
+
     public List<ModelOption> GetAvailableModels()
     {
         var providerList = new List<ModelOption>();

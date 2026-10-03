@@ -2,6 +2,21 @@ using System.Text.Json.Serialization;
 
 namespace AIChat.Api.Models;
 
+public class FileAttachment
+{
+    [JsonPropertyName("name")]
+    public string Name { get; set; } = string.Empty;
+
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = string.Empty; // "image" or "text" or mime type
+
+    [JsonPropertyName("data")]
+    public string Data { get; set; } = string.Empty; // base64 data url for images or text content for files
+
+    [JsonPropertyName("size")]
+    public long Size { get; set; }
+}
+
 public class ChatMessage
 {
     [JsonPropertyName("role")]
@@ -9,6 +24,9 @@ public class ChatMessage
 
     [JsonPropertyName("content")]
     public string Content { get; set; } = string.Empty;
+
+    [JsonPropertyName("attachments")]
+    public List<FileAttachment>? Attachments { get; set; }
 }
 
 public class ModelOption
