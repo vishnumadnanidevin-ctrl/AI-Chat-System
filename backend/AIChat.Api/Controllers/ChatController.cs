@@ -1,21 +1,27 @@
+using System.Security.Claims;
 using AIChat.Api.Config;
 using AIChat.Api.Models;
 using AIChat.Api.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace AIChat.Api.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/chat")]
 public class ChatController : ControllerBase
 {
     private readonly ChatServiceFactory _factory;
+    private readonly AuthService _authService;
 
-    public ChatController(ChatServiceFactory factory)
+    public ChatController(ChatServiceFactory factory, AuthService authService)
     {
         _factory = factory;
+        _authService = authService;
     }
 
+    [AllowAnonymous]
     [HttpGet("models")]
     public IActionResult GetModels()
     {
@@ -26,6 +32,19 @@ public class ChatController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> PostAsync([FromBody] ChatRequest request, CancellationToken cancellationToken)
     {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub");
+        if (!string.IsNullOrWhiteSpace(userId))
+        {
+            var (allowed, remaining, limit) = await _authService.CheckAndIncrementDailyQuotaAsync(userId);
+            if (!allowed)
+            {
+                return StatusCode(StatusCodes.Status429TooManyRequests, new 
+                { 
+                    error = $"Daily request limit of {limit} requests reached. Quota resets at 00:00 UTC.",
+                    quota = new { remaining, limit }
+                });
+            }
+        }
         if (request is null)
         {
             return BadRequest("Request body is required.");
@@ -82,6 +101,36 @@ public class ChatController : ControllerBase
 
         Console.WriteLine($"[ChatController] Dispatching to provider: '{effectiveProvider}', model: '{effectiveModel}'");
         var response = await providerService.SendAsync(executionRequest, cancellationToken);
+
+        // If Gemini or other provider returned an API key invalid or authorization error, auto-fallback to free tier
+        if (response.Contains("API_KEY_INVALID", StringComparison.OrdinalIgnoreCase) ||
+            response.Contains("API key not valid", StringComparison.OrdinalIgnoreCase) ||
+            response.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
+            response.Contains("403 Forbidden", StringComparison.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($"[ChatController] Provider '{effectiveProvider}' encountered key error. Auto-fallback to OpenRouter free model...");
+            try
+            {
+                var fallbackService = _factory.Create("OpenRouter", null, null);
+                var fallbackRequest = new ChatRequest
+                {
+                    Provider = "OpenRouter",
+                    Model = "qwen/qwen3.8-27b:free",
+                    Messages = request.Messages,
+                    SystemPrompt = request.SystemPrompt,
+                    Temperature = request.Temperature,
+                    MaxTokens = request.MaxTokens
+                };
+                response = await fallbackService.SendAsync(fallbackRequest, cancellationToken);
+                effectiveProvider = "OpenRouter";
+                effectiveModel = "qwen/qwen3.8-27b:free";
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[ChatController] Fallback failed: {ex.Message}");
+            }
+        }
+
         return Ok(new { response, provider = effectiveProvider, model = effectiveModel });
     }
 }

@@ -33,6 +33,7 @@ import ImageEditorModal from './components/ImageEditorModal';
 import TextFileEditorModal from './components/TextFileEditorModal';
 import EdgeSnippetOverlay from './components/EdgeSnippetOverlay';
 import AuthModal from './components/AuthModal';
+import { useAuth } from './context/AuthContext';
 import html2canvas from 'html2canvas';
 
 const INITIAL_MESSAGES = [
@@ -53,20 +54,15 @@ Select your model from the sidebar or click **Configure Key** to add your custom
 ];
 
 export default function App() {
+  const { user: authUser, isAuthenticated, logout: authLogout, authFetch, refreshUser } = useAuth();
   const [providers, setProviders] = useState([]);
   const [selectedProvider, setSelectedProvider] = useState('Gemini');
   const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash');
-
-  // User Authentication State
-  const [currentUser, setCurrentUser] = useState(() => {
-    try {
-      const saved = localStorage.getItem('ai_hub_current_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
-  });
   const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showUserDropdown, setShowUserDropdown] = useState(false);
+
+  // Current user derived from AuthContext
+  const currentUser = authUser;
 
   // Multi-Chat Sessions State
   const [sessions, setSessions] = useState(() => {
@@ -367,29 +363,7 @@ export default function App() {
   };
 
   const handleLoginSuccess = (userObj) => {
-    setCurrentUser(userObj);
     setShowAuthModal(false);
-
-    // Automatically provision & activate free-tier developer keys for all models
-    // Routes Claude, DeepSeek, GPT-4o, and Gemini through pre-configured system endpoints
-    setProviderOverrides((prev) => {
-      const updated = { ...prev };
-
-      // If user has custom keys saved, preserve them; otherwise enable free unified access
-      if (!updated.Gemini?.apiKey) {
-        updated.Gemini = { apiKey: 'system-active', baseUrl: '' };
-      }
-      if (!updated.OpenRouter?.apiKey) {
-        updated.OpenRouter = { apiKey: 'system-active', baseUrl: '' };
-      }
-
-      try {
-        localStorage.setItem('ai_hub_keys_config', JSON.stringify(updated));
-      } catch (e) {
-        console.warn('Failed to cache auto-activated keys', e);
-      }
-      return updated;
-    });
 
     // Notify user with a friendly system welcome in the active chat
     const welcomeNotice = {
@@ -401,9 +375,10 @@ export default function App() {
     setMessages((prev) => [...prev, welcomeNotice]);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     if (window.confirm('Sign out from your Dev AI account?')) {
-      setCurrentUser(null);
+      await authLogout();
+      setProviderOverrides({});
     }
   };
 
@@ -529,16 +504,31 @@ export default function App() {
     setMessages(newContext);
     setLoading(true);
 
+    if (!currentUser) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: '🔒 **Please Sign In**\n\nPlease sign in with your Google account to send messages and unlock all AI developer models.',
+          model: selectedModel,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+      setLoading(false);
+      setShowAuthModal(true);
+      return;
+    }
+
     const override = providerOverrides[selectedProvider] || {};
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await authFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider: selectedProvider,
           model: selectedModel,
-          apiKey: override.apiKey || null,
+          apiKey: (override.apiKey && override.apiKey !== 'system-active') ? override.apiKey : null,
           baseUrl: override.baseUrl || null,
           systemPrompt: customSystemPrompt || null,
           messages: newContext.map((m) => ({
@@ -549,6 +539,11 @@ export default function App() {
           maxTokens: parseInt(maxTokens, 10),
         }),
       });
+
+      if (response.status === 401) {
+        setShowAuthModal(true);
+        throw new Error('Your session has expired. Please sign in again.');
+      }
 
       const data = await response.json();
       if (!response.ok) {
@@ -563,6 +558,7 @@ export default function App() {
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      refreshUser();
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -582,6 +578,20 @@ export default function App() {
     if (e) e.preventDefault();
     if ((!input.trim() && attachments.length === 0) || loading) return;
 
+    if (!currentUser) {
+      setShowAuthModal(true);
+      setMessages((prev) => [
+        ...prev,
+        {
+          role: 'assistant',
+          content: '🔒 **Please Sign In**\n\nPlease sign in with your Google account to send messages and unlock all AI developer models.',
+          model: selectedModel,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        },
+      ]);
+      return;
+    }
+
     const timeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const currentAttachments = [...attachments];
     const userMessage = {
@@ -599,7 +609,7 @@ export default function App() {
     const override = providerOverrides[selectedProvider] || {};
 
     try {
-      const response = await fetch('/api/chat', {
+      const response = await authFetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -618,6 +628,11 @@ export default function App() {
         }),
       });
 
+      if (response.status === 401) {
+        setShowAuthModal(true);
+        throw new Error('Your session has expired. Please sign in again.');
+      }
+
       const data = await response.json();
       if (!response.ok) {
         throw new Error(data.error || data.title || 'The chat request encountered an error.');
@@ -631,6 +646,7 @@ export default function App() {
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
+      refreshUser();
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -900,6 +916,11 @@ export default function App() {
                   <Sparkles size={11} />
                   <span>All AI Models Active</span>
                 </span>
+                {currentUser.quota && (
+                  <span style={{ fontSize: '0.65rem', color: '#94a3b8', marginTop: 2 }}>
+                    Quota: {currentUser.quota.remaining} / {currentUser.quota.limit} today
+                  </span>
+                )}
               </div>
             </div>
             <button
@@ -938,20 +959,87 @@ export default function App() {
             </div>
           </div>
 
-          <div className="topbar-right">
+          <div className="topbar-right" style={{ position: 'relative' }}>
             {currentUser ? (
-              <div
-                className="key-badge-btn"
-                style={{ borderColor: 'rgba(16, 185, 129, 0.4)', background: 'rgba(16, 185, 129, 0.1)' }}
-                title={`Logged in as ${currentUser.email}`}
-              >
-                <img
-                  src={currentUser.avatar}
-                  alt={currentUser.name}
-                  style={{ width: 16, height: 16, borderRadius: '50%' }}
-                />
-                <span style={{ color: '#34d399' }}>{currentUser.name}</span>
-              </div>
+              <>
+                <button
+                  type="button"
+                  className="key-badge-btn"
+                  onClick={() => setShowConfigModal(true)}
+                  style={{ borderColor: 'rgba(16, 185, 129, 0.4)', background: 'rgba(16, 185, 129, 0.12)' }}
+                >
+                  <KeyRound size={13} className="text-emerald-400" />
+                  <span style={{ color: '#34d399' }}>Key Active</span>
+                </button>
+
+                <div style={{ position: 'relative' }}>
+                  <div
+                    className="key-badge-btn"
+                    style={{ borderColor: 'rgba(99, 102, 241, 0.4)', background: 'rgba(99, 102, 241, 0.12)', cursor: 'pointer' }}
+                    onClick={() => setShowUserDropdown((prev) => !prev)}
+                    title={`Logged in as ${currentUser.email}`}
+                  >
+                    <img
+                      src={currentUser.avatar || currentUser.pictureUrl || `https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(currentUser.email || 'user')}`}
+                      alt={currentUser.name}
+                      style={{ width: 16, height: 16, borderRadius: '50%' }}
+                    />
+                    <span style={{ color: '#c7d2fe' }}>{currentUser.name}</span>
+                    <ChevronDown size={12} style={{ color: '#94a3b8', marginLeft: 4 }} />
+                  </div>
+
+                  {showUserDropdown && (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '100%',
+                        right: 0,
+                        marginTop: 6,
+                        minWidth: 180,
+                        backgroundColor: '#181b26',
+                        border: '1px solid rgba(255, 255, 255, 0.12)',
+                        borderRadius: 8,
+                        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.5)',
+                        zIndex: 100,
+                        padding: '6px 0',
+                      }}
+                    >
+                      <div style={{ padding: '8px 12px', borderBottom: '1px solid rgba(255, 255, 255, 0.08)' }}>
+                        <div style={{ fontSize: '0.78rem', fontWeight: 600, color: '#f1f5f9' }}>{currentUser.name}</div>
+                        <div style={{ fontSize: '0.7rem', color: '#94a3b8', overflow: 'hidden', textOverflow: 'ellipsis' }}>{currentUser.email}</div>
+                        {currentUser.quota && (
+                          <div style={{ fontSize: '0.68rem', color: '#34d399', marginTop: 4 }}>
+                            Daily Quota: {currentUser.quota.remaining}/{currentUser.quota.limit}
+                          </div>
+                        )}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowUserDropdown(false);
+                          handleLogout();
+                        }}
+                        style={{
+                          width: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          padding: '8px 12px',
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#f43f5e',
+                          fontSize: '0.8rem',
+                          cursor: 'pointer',
+                          textAlign: 'left',
+                        }}
+                      >
+                        <LogOut size={14} />
+                        <span>Sign Out</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </>
             ) : (
               <button
                 type="button"
@@ -963,21 +1051,6 @@ export default function App() {
                 <span style={{ color: '#a5b4fc' }}>Sign In</span>
               </button>
             )}
-
-            <button
-              type="button"
-              className="key-badge-btn"
-              onClick={() => setShowConfigModal(true)}
-            >
-              <KeyRound size={13} />
-              <span>
-                {currentUser
-                  ? 'All AI Active'
-                  : (providerOverrides[selectedProvider]?.apiKey || currentProviderObj?.isConfigured
-                      ? 'Key Active'
-                      : 'Add Key')}
-              </span>
-            </button>
           </div>
         </header>
 

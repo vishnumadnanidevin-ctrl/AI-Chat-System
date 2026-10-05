@@ -137,10 +137,14 @@ public class ChatServiceFactory
             .Replace("o3-mini", "o3-mini (Reasoning)")
             .Replace("o1-mini", "o1-mini (Reasoning)")
             .Replace("codestral", "Mistral Codestral")
-            .Replace("gemini-3.8-flash", "Gemini 3.8 Flash (High Speed)")
-            .Replace("gemini-2.5-pro", "Gemini 2.5 Pro (Flagship)")
+            .Replace("gemini-3.5-flash-lite", "3.5 Flash-Lite")
+            .Replace("gemini-3.6-flash", "3.6 Flash")
+            .Replace("gemini-3.1-pro", "3.1 Pro")
+            .Replace("gemini-thinking", "Extended thinking")
+            .Replace("gemini-3.8-flash", "Gemini 3.8 Flash")
+            .Replace("gemini-2.5-pro", "Gemini 2.5 Pro")
             .Replace("gemini-2.5-flash", "Gemini 2.5 Flash")
-            .Replace("gemini-flash-lite-latest", "Gemini Flash-Lite");
+            .Replace("gemini-flash-lite-latest", "3.5 Flash-Lite");
 
         return new ModelDetail
         {

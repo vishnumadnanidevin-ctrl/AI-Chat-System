@@ -191,7 +191,8 @@ public class GeminiChatService : IChatService
     // Models tried in order on 503 overload
     private static readonly string[] FallbackChain = new[]
     {
-        "gemini-flash-lite-latest",
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
         "gemini-3.8-flash"
     };
 
@@ -233,7 +234,17 @@ public class GeminiChatService : IChatService
     private async Task<(bool success, bool isOverloaded, string text)> TrySendAsync(
         string modelId, ChatRequest request, string apiKey, CancellationToken cancellationToken)
     {
-        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{modelId}:generateContent?key={apiKey}";
+        // Map user-facing model identifiers to official Google API model identifiers
+        var apiModel = modelId switch
+        {
+            "gemini-3.5-flash-lite" => "gemini-3.5-flash-lite",
+            "gemini-3.6-flash" => "gemini-3.6-flash",
+            "gemini-3.1-pro" => "gemini-3.1-pro-preview",
+            "gemini-thinking" => "gemini-3.8-flash",
+            _ => modelId
+        };
+
+        var endpoint = $"https://generativelanguage.googleapis.com/v1beta/models/{apiModel}:generateContent?key={apiKey}";
 
         var contents = request.Messages.Select(m =>
         {
@@ -302,15 +313,6 @@ public class GeminiChatService : IChatService
                 parts = new[] { new { text = request.SystemPrompt } }
             };
         }
-
-        // Enable Google Search grounding for real-time internet access
-        payload["tools"] = new[]
-        {
-            new Dictionary<string, object>
-            {
-                ["google_search"] = new Dictionary<string, object>()
-            }
-        };
 
         var genConfig = new Dictionary<string, object>();
         if (request.Temperature > 0)

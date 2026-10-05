@@ -19,3 +19,8 @@ secrets.json
 *.suo
 *.user
 .idea/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
